@@ -1,8 +1,8 @@
 package main
 
 import (
-	"imageidentifier/server"
-	"imageidentifier/handlers"
+	"dogidentifier/server"
+	"dogidentifier/handlers"
 	"log"
 	"net/http"
 	"os"
@@ -11,8 +11,8 @@ import (
 
 func main() {
 	mux := http.NewServeMux()
-
-	mux.HandleFunc("/isImageOfDog", handlers.IsImageOfDog)
+	
+	mux.HandleFunc("/isUrlOfDog", handlers.IsUrlOfDog)
 
 	server := server.NewServer(mux)
 	var certificateFile = os.Getenv("IMAGE_IDENTIFIER_CERT_FILE")

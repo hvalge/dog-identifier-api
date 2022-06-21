@@ -1,4 +1,4 @@
-module imageidentifier
+module dogidentifier
 
 go 1.18
 

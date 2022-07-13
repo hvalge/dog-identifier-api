@@ -2,28 +2,90 @@ package handlers
 
 import (
 	"bytes"
+	"dogidentifier/helpers"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 	"os"
-	"strings"
+	"regexp"
 	"github.com/hashicorp/go-retryablehttp"
 )
 
-func IsUrlOfDog(w http.ResponseWriter, r *http.Request) {
-	googleApiKey := os.Getenv("IMAGE_IDENTIFIER_GOOGLE_API_KEY")
-	w.Header().Set("Content-Type", "application/json")
+func IsUrlOfDog(responseWriter http.ResponseWriter, request *http.Request) {
+	googleApiKey := os.Getenv("IMAGE_IDENTIFIER_GOOGLE_API_KEY");
 
-	imageURL := r.URL.Query().Get("imageUrl")
-	if !strings.HasPrefix(imageURL, "http://") && !strings.HasPrefix(imageURL, "https://") {
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`{
-			"error": "URL is invalid."
-			}`))
-		return
+	if googleApiKey == "" {
+		fmt.Println("Did not find valid Google API key!");
+		responseMessage := "Could not handle request. Please try again later.";
+		helpers.SendErrorResponse(responseWriter, http.StatusInternalServerError, responseMessage);
+		return;
 	}
 
+	imageURL, err := verifyImageUrl(request);
+	if err != nil {
+		responseMessage := "URL format is invalid.";
+		helpers.SendErrorResponse(responseWriter, http.StatusBadRequest, responseMessage);
+		return;
+	}
+
+	response, err := getResultFromVisionApiWithURL(imageURL, googleApiKey);
+	if err != nil {
+		fmt.Printf("Failed to get response from API.");
+		responseMessage := "Could not handle request. Please try again later.";
+		helpers.SendErrorResponse(responseWriter, http.StatusBadRequest, responseMessage);
+		return;
+	}
+	defer response.Body.Close();
+
+	responseBody, err := ioutil.ReadAll(response.Body);
+	if err != nil {
+		fmt.Printf("Error reading body response from Google Vision API: %v\n", err);
+		responseMessage := "Could not handle request. Please try again later.";
+		helpers.SendErrorResponse(responseWriter, http.StatusBadRequest, responseMessage);
+		return;
+	}
+
+	result, err := parseResponseBodyToSuccessResponseFormat(responseBody);
+	if err != nil {
+		fmt.Printf("Error parsing JSON response from Google Vision API: %v\n", err);
+		responseMessage := "Could not handle request. Please try again later.";
+		helpers.SendErrorResponse(responseWriter, http.StatusBadRequest, responseMessage);
+		return;
+	}
+
+	if resultContainsIdentificationLabelsForImage(result) {
+		errorMessage := determineResponseErrorMessageFromVisionResponse(responseBody);
+		helpers.SendErrorResponse(responseWriter, http.StatusBadRequest, errorMessage);
+	}
+
+	sendResponseIfImageOfDogOrNot(responseWriter, result);
+}
+
+func verifyImageUrl(request *http.Request) (string, error) {
+	imageURL := request.URL.Query().Get("imageUrl");
+	if isImage(imageURL) {
+		return "", errors.New("invalid url format");
+	}
+	return imageURL, nil;
+}
+
+func isImage(imageURL string) bool {
+	r, _ := regexp.Compile(`/^https?:\/\/.+\.(jpg|jpeg|png|webp|avif|gif|svg)$/`);
+	return r.MatchString(imageURL);
+}
+
+func parseResponseBodyToSuccessResponseFormat(responseBody []byte) (helpers.VisionAPISuccessResponseFormat, error) {
+	var result helpers.VisionAPISuccessResponseFormat;
+	err := json.Unmarshal(responseBody, &result);
+	if (err != nil) {
+		return result, err;
+	}
+	return result, nil;
+}
+
+func getResultFromVisionApiWithURL(imageURL string, googleApiKey string) (*http.Response, error) {
 	requestBody := []byte(`{
 		"requests": [
 			{
@@ -39,111 +101,34 @@ func IsUrlOfDog(w http.ResponseWriter, r *http.Request) {
 				]
 			}
 		]
-	}`)
-	requestBodyBytes := bytes.NewBuffer(requestBody)
-	response, err := retryablehttp.Post("https://vision.googleapis.com/v1/images:annotate?key="+googleApiKey, "application/json", requestBodyBytes)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`{
-			"error": "Failed to request Google Vision API. Please try again later."
-			}`))
-		fmt.Println(err)
-		return
-	}
-	defer response.Body.Close()
+	}`);
+	requestBodyBytes := bytes.NewBuffer(requestBody);
+	response, err := retryablehttp.Post("https://vision.googleapis.com/v1/images:annotate?key="+googleApiKey, "application/json", requestBodyBytes);
+	return response, err;
+}
 
-	responseBody, err := ioutil.ReadAll(response.Body)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`{
-			"error": "Something went wrong with parsing response from Google Vision API."
-			}`))
-		fmt.Printf("Error reading body response from Google Vision API: %v\n", err)
-		return
-	}
+func resultContainsIdentificationLabelsForImage(result helpers.VisionAPISuccessResponseFormat) bool {
+	return len(result.Responses[0].LabelAnnotations) == 0;
+}
 
-	var successfulResult successfulVisionAPIResult
-	err = json.Unmarshal(responseBody, &successfulResult)
-	if (err != nil) {
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`{
-			"error": "Got invalid JSON syntax from Google API."
-			}`))
-		fmt.Printf("Error parsing response from Google Vision API: %v\n", err)
-	}
+func determineResponseErrorMessageFromVisionResponse(responseBody []byte) string {
+	const notAnImageResponseMessage = "Bad image data.";
+	const inaccessibleURLResponseMessage = "The URL does not appear to be accessible by us. Please double check or download the content and pass it in.";
 
-	var gotImageResult bool = verifyResultAndRespondOnFailure(successfulResult, responseBody, w)
-	if !gotImageResult {
-		return
-	}
-
-	isDog := false
-	for _, label := range successfulResult.Responses[0].LabelAnnotations {
-		if label.Description == "Dog" && label.Score > 0.7 {
-			isDog = true
-			break
-		}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	if isDog {
-		w.Write([]byte(`{
-			"message": "Image contains a dog."
-		}`))
+	var unsuccessfulResult helpers.VisionApiErrorResponseFormat;
+	json.Unmarshal(responseBody, &unsuccessfulResult);
+	visionApiErrorMessage := unsuccessfulResult.Responses[0].Error.Message;
+	if visionApiErrorMessage == inaccessibleURLResponseMessage {
+		return "URL is invalid or not accessible.";
+	} else if visionApiErrorMessage == notAnImageResponseMessage {
+		return "URL does not contain raw image data.";
 	} else {
-		w.Write([]byte(`{
-			"message": "Image does not contain a dog."
-		}`))
+		fmt.Printf("Unknown error response from google: {%s}", visionApiErrorMessage);
+		return "Unknown error occurred. Please check your data.";
 	}
 }
 
-type successfulVisionAPIResult struct {
-	Responses []struct {
-		LabelAnnotations []struct {
-			Mid         string  `json:"mid"`
-			Description string  `json:"description"`
-			Score       float64 `json:"score"`
-			Topicality  float64 `json:"topicality"`
-		}
-	}
-}
-
-type unsuccessfulVisionAPIResult struct {
-	Responses []struct {
-		Error struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		}
-	}
-}
-
-func verifyResultAndRespondOnFailure(successfulResult successfulVisionAPIResult, responseBody []byte, w http.ResponseWriter) bool {
-	if len(successfulResult.Responses[0].LabelAnnotations) == 0 {
-		const notAnImageResponseMessage = "Bad image data."
-		const inaccessibleURLResponseMessage = "The URL does not appear to be accessible by us. Please double check or download the content and pass it in."
-
-		w.WriteHeader(http.StatusBadRequest)
-		
-		var unsuccessfulResult unsuccessfulVisionAPIResult
-		json.Unmarshal(responseBody, &unsuccessfulResult)
-		if unsuccessfulResult.Responses[0].Error.Message == notAnImageResponseMessage {
-			w.Write([]byte(`{
-				"error": "URL does not contain raw image data."
-		}`))
-		} else if unsuccessfulResult.Responses[0].Error.Message == inaccessibleURLResponseMessage {
-			w.Write([]byte(`{
-				"error": "URL is invalid or not accessible."
-		}`))
-		} else {
-			w.Write([]byte(`{
-				"error": "Something went wrong."
-				"body": ` + string(responseBody) + `
-		}`))
-		}
-
-		return false
-	} else {
-		return true
-	}
+func sendResponseIfImageOfDogOrNot(responseWriter http.ResponseWriter, result helpers.VisionAPISuccessResponseFormat) {
+	isDog := helpers.IsImageOfDogFromVisionData(result);
+	helpers.SendIdentificationResponse(responseWriter, isDog);
 }

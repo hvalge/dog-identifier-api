@@ -1,18 +1,17 @@
-package handlers
+package handlers;
 
 import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-)
+);
 
 func TestIsUrlOfDogHandler(t *testing.T) {
 	const successMessageWithDog = `"message": "Image contains a dog."`
 	const successMessageWithoutDog = `"message": "Image does not contain a dog."`
-	const invalidURLMessage = `"error": "URL is invalid."`
-	const unusableURLMessage = `"error": "URL is invalid or not accessible."`
-	const invalidImageMessage = `"error": "URL does not contain raw image data."`
+	const invalidURLMessage = `"message": "URL is invalid."`
+	const unusableURLMessage = `"message": "URL is invalid or not accessible."`
 	tests := []struct {
 		name           string
 		in             *http.Request
@@ -53,14 +52,14 @@ func TestIsUrlOfDogHandler(t *testing.T) {
 			in:             httptest.NewRequest("GET", "/isUrlOfDog?imageUrl=https://www.google.com", nil),
 			out:            httptest.NewRecorder(),
 			expectedStatus: http.StatusBadRequest,
-			expectedBody:   invalidImageMessage,
+			expectedBody:   invalidURLMessage,
 		},
 	}
 
 	for _, test := range tests {
-		test := test
+		test := test;
 		t.Run(test.name, func(t *testing.T) {
-			IsUrlOfDog(test.out, test.in)
+			IsUrlOfDog(test.out, test.in);
 			if test.out.Code != test.expectedStatus {
 				t.Logf("expected status code: %d\ngot: %d\n", test.expectedStatus, test.out.Code)
 				t.Fail()
